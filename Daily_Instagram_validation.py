@@ -1,11 +1,33 @@
 import requests
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import os
 
-ACCESS_TOKEN = "EAAD70HM0dlEBSAGngbr7fIVLX9OMGqw2ldT46V0ohMuZAZAroAZANBQ38hNxtwSW2plctlscJSSSCfik4QgPsAFQ4zRVhZCAu0lYsa4CoPymGPu7bXJXcpfCmfGUXt1c8eAZCId6owZCDtbGlPPG4iwEhwrIRnaZC95hdJX5D4RI4c8x7a55GLqlsdelxeemJwXhAIS"
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+
+instagram_id = "17841408107333098"
+facebook_id = "748841775232461"
+dealer_id = "12162"
+name = "KTM_Husqvarna_Andheri_East"
 
 
+start_date = datetime.strptime("25-08-2026", "%d-%m-%Y")
+end_date = datetime.strptime("31-08-2026", "%d-%m-%Y")
 
+
+metrics = [
+    "reach",
+    "views",
+    "accounts_engaged",
+    "total_interactions",
+    "likes",
+    "comments",
+    "saves",
+    "shares",
+    "profile_links_taps",
+    "replies",
+    "reposts"
+]
 
 
 def unix_conversion(current_date):
@@ -17,13 +39,6 @@ def unix_conversion(current_date):
 
     return since, until
 
-    # print("\nPostman values:")
-    # print("since =", since)
-    # print("until =", until)
-    #
-    # print("\nIST:")
-    # print("Start:", date_ist)
-    # print("End:  ", date_ist + timedelta(days=1))
 def extract_insight_values(api_response, instagram_id, date):
     rows = []
 
@@ -35,13 +50,153 @@ def extract_insight_values(api_response, instagram_id, date):
         value = total_value.get("value")
 
         rows.append({
+            "Dealer_Code": dealer_id,
+            "Facebook_ID": facebook_id,
             "Instagram_ID": instagram_id,
+            "Outlet_Name":name,
             "Date": date.strftime("%Y-%m-%d"),
             "Metric": metric,
-            "API_Value": value
+            "API_Value": value,
+
         })
 
     return rows
+
+
+def generate_remark(row):
+
+    api_value = row["API_Value"]
+    bq_value = row["BQ_Value"]
+    difference = row["Difference"]
+    metric = row["Metric"]
+
+    # --------------------------------------------------
+    # BOTH VALUES MISSING
+    # --------------------------------------------------
+
+    if pd.isna(api_value) and pd.isna(bq_value):
+
+        return (
+            "No comparable value is available from either "
+            "the API or BigQuery."
+        )
+
+    # --------------------------------------------------
+    # API VALUE MISSING
+    # --------------------------------------------------
+
+    if pd.isna(api_value):
+
+        return (
+            "API value is unavailable for this metric, "
+            "so validation cannot be completed."
+        )
+
+    # --------------------------------------------------
+    # BQ VALUE MISSING
+    # --------------------------------------------------
+
+    if pd.isna(bq_value):
+
+        return (
+            "BigQuery value is unavailable for this metric, "
+            "so validation cannot be completed."
+        )
+
+    # --------------------------------------------------
+    # EXACT MATCH - BOTH ZERO
+    # --------------------------------------------------
+
+    if api_value == 0 and bq_value == 0:
+
+        return (
+            "Exact match. Both sides zero."
+        )
+
+    # --------------------------------------------------
+    # EXACT MATCH
+    # --------------------------------------------------
+
+    if api_value == bq_value:
+
+        return (
+            "Exact match."
+        )
+
+    # --------------------------------------------------
+    # API HIGHER THAN BQ
+    # --------------------------------------------------
+
+    if api_value > bq_value:
+
+        return (
+            f"API value is higher than BigQuery by "
+            f"{difference}. The API returns the current "
+            f"post insight value, while BigQuery contains "
+            f"the value captured during the earlier data fetch. "
+            f"The difference may represent activity accrued "
+            f"after the BigQuery capture."
+        )
+
+    # --------------------------------------------------
+    # BQ HIGHER THAN API
+    # --------------------------------------------------
+
+    if api_value < bq_value:
+
+        return (
+            f"BigQuery value is higher than the current API "
+            f"value by {abs(difference)}. This may indicate "
+            f"an insight restatement, content activity change, "
+            f"or a difference between capture timings. "
+            f"Further investigation may be required."
+        )
+
+
+def calculate_difference_percent(row):
+
+    api_value = row["API_Value"]
+    bq_value = row["BQ_Value"]
+
+    # Cannot calculate if either value is missing
+    if pd.isna(api_value) or pd.isna(bq_value):
+        return None
+
+    # Exact match when both are zero
+    if api_value == 0 and bq_value == 0:
+        return 0
+
+    # Avoid division by zero
+    if bq_value == 0:
+        return None
+
+    return (
+        row["Difference"] /
+        abs(bq_value)
+    ) * 100
+
+
+def generate_status(row):
+
+    api_value = row["API_Value"]
+    bq_value = row["BQ_Value"]
+
+    # Missing values
+    if pd.isna(api_value) or pd.isna(bq_value):
+        return "Not validated"
+
+    # Exact match
+    if api_value == bq_value:
+        return "Pass"
+
+    # API higher
+    if api_value > bq_value:
+        return "Pass-accrual lag"
+
+    # BQ higher
+    if api_value < bq_value:
+        return "Pass-within tolerance"
+
 
 def get_instagram_insights(
     instagram_id,
@@ -99,26 +254,117 @@ def get_instagram_insights(
     return response.json()
 
 
+def excel_validation():
+    # for excel file validation
+    from openpyxl import load_workbook
+    from openpyxl.styles import Alignment, PatternFill
 
-start_date = datetime.strptime("01-07-2026", "%d-%m-%Y")
-end_date = datetime.strptime("31-07-2026", "%d-%m-%Y")
+    wb = load_workbook(output_file)
+    ws = wb["Page Report"]
+
+    # ============================================================
+    # MERGE SAME DATE GROUP ROWS      , when instagram id have same dealer_id else use Group by technique
+    # ============================================================
+
+    merge_columns = ["A", "B", "C", "D", "E"]  # Columns on which grouping will be apply
+
+    max_row = ws.max_row
+    current_start = 2
+
+    for row in range(3, max_row + 2):
+
+        current_date = (
+            ws[f"E{row}"].value
+            if row <= max_row
+            else None
+        )
+
+        previous_date = ws[f"E{row - 1}"].value
+
+        # End of a date group
+        if row > max_row or current_date != previous_date:
+
+            end_row = row - 1
+
+            # Merge only when there is more than one row
+            if end_row > current_start:
+
+                for column in merge_columns:
+                    ws.merge_cells(
+                        f"{column}{current_start}:{column}{end_row}"
+                    )
+
+                    cell = ws[f"{column}{current_start}"]
+
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center"
+                    )
+
+            current_start = row
+
+    # ============================================================
+    # STATUS COLORS
+    # ============================================================
+
+    pass_fill = PatternFill(
+        fill_type="solid",
+        fgColor="C6E0B4"
+    )
+
+    tolerance_fill = PatternFill(
+        fill_type="solid",
+        fgColor="FFF2CC"
+    )
+
+    issue_fill = PatternFill(
+        fill_type="solid",
+        fgColor="F4CCCC"
+    )
+
+    not_validated_fill = PatternFill(
+        fill_type="solid",
+        fgColor="D9D9D9"
+    )
+
+    # Get header -> column mapping
+    headers = {
+        cell.value: cell.column_letter
+        for cell in ws[1]
+    }
+
+    status_column = headers["Status"]
+
+    for row in range(2, ws.max_row + 1):
+
+        status_cell = ws[f"{status_column}{row}"]
+        status = status_cell.value
+
+        if status == "Pass":
+            status_cell.fill = pass_fill
+
+        elif status == "Pass-within tolerance":
+            status_cell.fill = tolerance_fill
+
+        elif status == "Pass-accrual lag":
+            status_cell.fill = issue_fill
+
+        elif status == "Not validated":
+            status_cell.fill = not_validated_fill
+
+    # ============================================================
+    # IMPORTANT: SAVE AFTER ALL MODIFICATIONS
+    # ============================================================
+
+    wb.save(output_file)
+
+    print("Excel formatting, merging and colors applied successfully.")
 
 
-instagram_id = "17841408107333098"
 
-metrics = [
-    "reach",
-    "views",
-    "accounts_engaged",
-    "total_interactions",
-    "likes",
-    "comments",
-    "saves",
-    "shares",
-    "profile_links_taps",
-    "replies",
-    "reposts"
-]
+
+
+
 
 results = []
 
@@ -146,11 +392,8 @@ while current_date <= end_date:
     # Extract metric values
     values = extract_insight_values(data,instagram_id,current_date)
 
-
     # Add date and IG ID
     results.extend(values)
-
-
 
     # Move to next day
     current_date += timedelta(days=1)
@@ -161,10 +404,31 @@ while current_date <= end_date:
 api_df = pd.DataFrame(results)
 
 # ============================================================
+# NORMALIZE API DATA
+# ============================================================
+
+api_df["Instagram_ID"] = (
+    api_df["Instagram_ID"]
+    .astype(str)
+    .str.strip()
+)
+
+api_df["Date"] = pd.to_datetime(
+    api_df["Date"],
+    errors="coerce"
+).dt.strftime("%Y-%m-%d")
+
+api_df["Metric"] = (
+    api_df["Metric"]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+)
+# ============================================================
 # BIGQUERY DATA
 # ============================================================
 
-bq_file = "BQ_Data/sqllab_untitled_query_1_20260827T105714.csv"
+bq_file = "BQ_Data/sqllab_untitled_query_4_20260907T074016.csv"
 
 bq_df = pd.read_csv(bq_file)
 
@@ -185,7 +449,27 @@ bq_metric_mapping = {
 }
 
 
-# Convert BQ wide format -> long format
+# ============================================================
+# NORMALIZE BQ DATA
+# ============================================================
+
+# Convert Activity_Date to datetime
+bq_df["Activity_Date"] = pd.to_datetime(
+    bq_df["Activity_Date"],
+    errors="coerce"
+)
+
+# Filter BQ data using actual datetime objects
+bq_df = bq_df[
+    (bq_df["Activity_Date"] >= start_date) &
+    (bq_df["Activity_Date"] <= end_date)
+].copy()
+
+
+# ============================================================
+# CONVERT BQ WIDE FORMAT -> LONG FORMAT
+# ============================================================
+
 bq_long = bq_df.melt(
     id_vars=["Activity_Date"],
     value_vars=list(bq_metric_mapping.keys()),
@@ -193,35 +477,32 @@ bq_long = bq_df.melt(
     value_name="BQ_Value"
 )
 
-
-# Convert BQ metric names to API metric names
+# Map BQ metric names to API metric names
 bq_long["Metric"] = bq_long["BQ_Metric"].map(
     bq_metric_mapping
 )
 
 
-# Convert date
+# Normalize Date
 bq_long["Date"] = pd.to_datetime(
-    bq_long["Activity_Date"]
+    bq_long["Activity_Date"],
+    errors="coerce"
 ).dt.strftime("%Y-%m-%d")
 
 
-# Add Instagram ID
-bq_long["Instagram_ID"] = instagram_id
+# Normalize Metric
+bq_long["Metric"] = (
+    bq_long["Metric"]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+)
 
-
-# ============================================================
-# FILTER BQ DATA TO SAME DATE RANGE AS API
-# ============================================================
-
-start_date_str = start_date.strftime("%Y-%m-%d")
-end_date_str = end_date.strftime("%Y-%m-%d")
-
-bq_long = bq_long[
-    (bq_long["Date"] >= start_date_str) &
-    (bq_long["Date"] <= end_date_str)
-]
-
+# Add identifying columns
+bq_long["Dealer_Code"] = str(dealer_id).strip()
+bq_long["Facebook_ID"] = str(facebook_id).strip()
+bq_long["Instagram_ID"] = str(instagram_id).strip()
+bq_long["Outlet_Name"] = str(name).strip()
 
 # ============================================================
 # MERGE API + BQ
@@ -236,7 +517,6 @@ validation_df = pd.merge(
     how="outer"
 )
 
-
 # ============================================================
 # DIFFERENCE
 # ============================================================
@@ -245,76 +525,71 @@ validation_df["Difference"] = (
     validation_df["API_Value"]
     - validation_df["BQ_Value"]
 )
-
-
 # ============================================================
 # DIFFERENCE %
 # ============================================================
 
 validation_df["Difference_%"] = validation_df.apply(
-    lambda row:
-        0
-        if row["API_Value"] == row["BQ_Value"]
-        else (
-            abs(row["Difference"])
-            / abs(row["BQ_Value"])
-            * 100
-            if row["BQ_Value"] != 0
-            else None
-        ),
+    calculate_difference_percent,
     axis=1
 )
 
-
+    #  Adding Remark Column
+validation_df["Remark"] = validation_df.apply(
+    generate_remark,
+    axis=1
+)
 # ============================================================
 # STATUS
 # ============================================================
 
 validation_df["Status"] = validation_df.apply(
-    lambda row:
-        "VALIDATED"
-        if row["API_Value"] == row["BQ_Value"]
-        else "ISSUE",
+    generate_status,
     axis=1
 )
-
-
 # ============================================================
 # FINAL COLUMN ORDER
 # ============================================================
 
 validation_df = validation_df[
     [
+        "Dealer_Code",
+        "Facebook_ID",
         "Instagram_ID",
+        "Outlet_Name",
         "Date",
         "Metric",
         "API_Value",
         "BQ_Value",
         "Difference",
         "Difference_%",
-        "Status"
+        "Status",
+        "Remark"
     ]
 ]
-
 
 # Sort by date and metric
 validation_df = validation_df.sort_values(
     ["Date", "Metric"]
 )
 
-
 # ============================================================
 # SAVE EXCEL
 # ============================================================
 
-validation_df.to_excel(
-    "instagram_validation_july_report.xlsx",
-    index=False
-)
+output_file = "Results/Socionix_instagram_report_validation_6.xlsx"
 
+validation_df.to_excel(
+    output_file,
+    index=False,
+    sheet_name="Page Report"
+)
 print("Validation report created successfully.")
 
 
+  #  validate excel file
+
+excel_validation()
 
 
 

@@ -4,7 +4,10 @@ import pandas as pd
 
 ACCESS_TOKEN = "EAAD70HM0dlEBSAGngbr7fIVLX9OMGqw2ldT46V0ohMuZAZAroAZANBQ38hNxtwSW2plctlscJSSSCfik4QgPsAFQ4zRVhZCAu0lYsa4CoPymGPu7bXJXcpfCmfGUXt1c8eAZCId6owZCDtbGlPPG4iwEhwrIRnaZC95hdJX5D4RI4c8x7a55GLqlsdelxeemJwXhAIS"
 
-
+instagram_id = "17841408107333098"
+facebook_id = "748841775232461"
+dealer_id = "12162"
+name = "KTM_Husqvarna_Andheri_East"
 
 
 
@@ -55,7 +58,7 @@ def get_instagram_post_insights(
 
 
 
-instagram_id = "17841408107333098"
+
 
 metrics = [
     "views",
@@ -124,7 +127,10 @@ for _, row in bq_df.iterrows():
     for bq_column, api_metric in metric_mapping.items():
 
         record = {
+            "Dealer_id": dealer_id,
+            "Facebook_id": facebook_id,
             "Instagram_ID": instagram_id,
+            "Name":name,
             "Media_ID": media_id,
             "Post_Date": row["Post_Date"],
             "Metric": api_metric,
@@ -241,12 +247,128 @@ validation_df = validation_df.sort_values(
 # SAVE EXCEL
 # ============================================================
 
+output_file = "Socionix_instagram_report_validation.xlsx"
+
 validation_df.to_excel(
-    "instagram_post_validation_report_17841408107333098.xlsx",
-    index=False
+    output_file,
+    index=False,
+    sheet_name="Page Report"
+)
+print("Validation report created successfully.")
+
+
+# for excel file validation
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, PatternFill
+
+wb = load_workbook(output_file)
+ws = wb["Page Report"]
+
+
+# ============================================================
+# MERGE SAME DATE GROUP ROWS      , when instagram id have same dealer_id else use Group by technique
+# ============================================================
+
+merge_columns = ["A", "B", "C", "D", "E"]    #Columns on which grouping will be apply
+
+max_row = ws.max_row
+current_start = 2
+
+
+for row in range(3, max_row + 2):
+
+    current_date = (
+        ws[f"E{row}"].value
+        if row <= max_row
+        else None
+    )
+
+    previous_date = ws[f"E{row - 1}"].value
+
+    # End of a date group
+    if row > max_row or current_date != previous_date:
+
+        end_row = row - 1
+
+        # Merge only when there is more than one row
+        if end_row > current_start:
+
+            for column in merge_columns:
+
+                ws.merge_cells(
+                    f"{column}{current_start}:{column}{end_row}"
+                )
+
+                cell = ws[f"{column}{current_start}"]
+
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center"
+                )
+
+        current_start = row
+
+
+# ============================================================
+# STATUS COLORS
+# ============================================================
+
+pass_fill = PatternFill(
+    fill_type="solid",
+    fgColor="C6E0B4"
 )
 
-print("Validation report created successfully.")
+tolerance_fill = PatternFill(
+    fill_type="solid",
+    fgColor="FFF2CC"
+)
+
+issue_fill = PatternFill(
+    fill_type="solid",
+    fgColor="F4CCCC"
+)
+
+not_validated_fill = PatternFill(
+    fill_type="solid",
+    fgColor="D9D9D9"
+)
+
+
+# Get header -> column mapping
+headers = {
+    cell.value: cell.column_letter
+    for cell in ws[1]
+}
+
+status_column = headers["Status"]
+
+
+for row in range(2, ws.max_row + 1):
+
+    status_cell = ws[f"{status_column}{row}"]
+    status = status_cell.value
+
+    if status == "Pass":
+        status_cell.fill = pass_fill
+
+    elif status == "Pass-within tolerance":
+        status_cell.fill = tolerance_fill
+
+    elif status == "Pass-accrual lag":
+        status_cell.fill = issue_fill
+
+    elif status == "Not validated":
+        status_cell.fill = not_validated_fill
+
+
+# ============================================================
+# IMPORTANT: SAVE AFTER ALL MODIFICATIONS
+# ============================================================
+
+wb.save(output_file)
+
+print("Excel formatting, merging and colors applied successfully.")
+
 
 
 
