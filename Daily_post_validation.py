@@ -1,13 +1,32 @@
 import requests
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import os
+from dotenv import load_dotenv
 
-ACCESS_TOKEN = "EAAD70HM0dlEBSAGngbr7fIVLX9OMGqw2ldT46V0ohMuZAZAroAZANBQ38hNxtwSW2plctlscJSSSCfik4QgPsAFQ4zRVhZCAu0lYsa4CoPymGPu7bXJXcpfCmfGUXt1c8eAZCId6owZCDtbGlPPG4iwEhwrIRnaZC95hdJX5D4RI4c8x7a55GLqlsdelxeemJwXhAIS"
+load_dotenv()
+
+ACCESS_TOKEN= os.getenv("ACCESS_TOKEN")
 
 instagram_id = "17841408107333098"
 facebook_id = "748841775232461"
 dealer_id = "12162"
 name = "KTM_Husqvarna_Andheri_East"
+
+
+
+metrics = [
+    "reach",
+    "views",
+    "total_interactions",
+    "likes",
+    "comments",
+    "saved",
+    "shares",
+    "reposts"
+]
+
+
 
 
 
@@ -26,17 +45,13 @@ def extract_post_insight_values(data):
             result[metric_name] = values[0]["value"]
         else:
             result[metric_name] = 0
-
+    print("extracted post insight values completed")
     return result
 
 
 
 
-def get_instagram_post_insights(
-        media_id,
-        access_token,
-        metrics
-):
+def get_instagram_post_insights(media_id,access_token,metrics):
     url = f"https://graph.facebook.com/v26.0/{media_id}/insights"
 
     params = {
@@ -50,40 +65,149 @@ def get_instagram_post_insights(
         timeout=30
     )
 
+
     response.raise_for_status()
 
     return response.json()
 
 
 
+def generate_remark(row):
+
+    api_value = row["API_Value"]
+    bq_value = row["BQ_Value"]
+    difference = row["Difference"]
+    metric = row["Metric"]
+
+    # --------------------------------------------------
+    # BOTH VALUES MISSING
+    # --------------------------------------------------
+
+    if pd.isna(api_value) and pd.isna(bq_value):
+
+        return (
+            "No comparable value is available from either "
+            "the API or BigQuery."
+        )
+
+    # --------------------------------------------------
+    # API VALUE MISSING
+    # --------------------------------------------------
+
+    if pd.isna(api_value):
+
+        return (
+            "API value is unavailable for this metric, "
+            "so validation cannot be completed."
+        )
+
+    # --------------------------------------------------
+    # BQ VALUE MISSING
+    # --------------------------------------------------
+
+    if pd.isna(bq_value):
+
+        return (
+            "BigQuery value is unavailable for this metric, "
+            "so validation cannot be completed."
+        )
+
+    # --------------------------------------------------
+    # EXACT MATCH - BOTH ZERO
+    # --------------------------------------------------
+
+    if api_value == 0 and bq_value == 0:
+
+        return (
+            "Exact match. Both sides zero."
+        )
+
+    # --------------------------------------------------
+    # EXACT MATCH
+    # --------------------------------------------------
+
+    if api_value == bq_value:
+
+        return (
+            "Exact match."
+        )
+
+    # --------------------------------------------------
+    # API HIGHER THAN BQ
+    # --------------------------------------------------
+
+    if api_value > bq_value:
+
+        return (
+            f"API value is higher than BigQuery by "
+            f"{difference}. The API returns the current "
+            f"post insight value, while BigQuery contains "
+            f"the value captured during the earlier data fetch. "
+            f"The difference may represent activity accrued "
+            f"after the BigQuery capture."
+        )
+
+    # --------------------------------------------------
+    # BQ HIGHER THAN API
+    # --------------------------------------------------
+
+    if api_value < bq_value:
+
+        return (
+            f"BigQuery value is higher than the current API "
+            f"value by {abs(difference)}. This may indicate "
+            f"an insight restatement, content activity change, "
+            f"or a difference between capture timings. "
+            f"Further investigation may be required."
+        )
+
+def generate_status(row):
+
+    api_value = row["API_Value"]
+    bq_value = row["BQ_Value"]
+
+    # Missing values
+    if pd.isna(api_value) or pd.isna(bq_value):
+        return "Not validated"
+
+    # Exact match
+    if api_value == bq_value:
+        return "Pass"
+
+    # API higher
+    if api_value > bq_value:
+        return "Pass-accrual lag"
+
+    # BQ higher
+    if api_value < bq_value:
+        return "Pass-within tolerance"
 
 
 
 
-metrics = [
-    "views",
-    "reach",
-    "likes",
-    "comments",
-    "saved",
-    "shares",
-    "total_interactions",
-    "reposts"
-]
 
+
+"""
+It does not take daily date but work based on the day of post(that will taken from b_q data).
+But suppose big_query missed any post that cause error
+Each post have unique media id and a post date and data(metrics) till today 
+
+"""
 
       # Load big query99 data
-bq_file = "BQ_Data/sqllab_untitled_query_1_20260831T080253.csv"
+bq_file = "BQ_Data/sqllab_untitled_query_1_20260831T080253.csv"   # from vw_dealer_ig_post_report
 
 bq_df = pd.read_csv(bq_file)
 
 
-  # filter data for specific date range
+
 bq_df["Post_Date"] = pd.to_datetime(
     bq_df["Post_Date"]
 )
 
-start_date = pd.Timestamp("2026-07-01")
+# filter data for specific date range
+
+start_date = pd.Timestamp("2026-08-01")
 end_date = pd.Timestamp("2026-08-10")
 
 bq_df = bq_df[
@@ -108,6 +232,8 @@ metric_mapping = {
 
 
 
+print("got the big_query data")
+
 all_records = []
 
 for _, row in bq_df.iterrows():
@@ -121,16 +247,16 @@ for _, row in bq_df.iterrows():
         access_token=ACCESS_TOKEN,
         metrics=metrics
     )
-
+    print("extracting post insights")
     api_values = extract_post_insight_values(media_data)
 
     for bq_column, api_metric in metric_mapping.items():
 
         record = {
-            "Dealer_id": dealer_id,
-            "Facebook_id": facebook_id,
+            "Dealer_Code": dealer_id,
+            "Facebook_ID": facebook_id,
             "Instagram_ID": instagram_id,
-            "Name":name,
+            "Outlet_Name":name,
             "Media_ID": media_id,
             "Post_Date": row["Post_Date"],
             "Metric": api_metric,
@@ -211,20 +337,25 @@ post_api_df["Difference_%"] = post_api_df["Difference_%"].round(2)
 # ============================================================
 
 post_api_df["Status"] = post_api_df.apply(
-    lambda row:
-        "VALIDATED"
-        if row["API_Value"] == row["BQ_Value"]
-        else "ISSUE",
+    generate_status,
     axis=1
 )
 
+    #  Adding Remark Column
+post_api_df["Remark"] = post_api_df.apply(
+    generate_remark,
+    axis=1
+)
 # ============================================================
 # FINAL COLUMN ORDER
 # ============================================================
 
 validation_df = post_api_df[
     [
+        "Dealer_Code",
+        "Facebook_ID",
         "Instagram_ID",
+        "Outlet_Name",
         "Media_ID",
         "Post_Date",
         "Metric",
@@ -232,7 +363,8 @@ validation_df = post_api_df[
         "BQ_Value",
         "Difference",
         "Difference_%",
-        "Status"
+        "Status",
+        "Remark"
     ]
 ]
 
@@ -247,7 +379,7 @@ validation_df = validation_df.sort_values(
 # SAVE EXCEL
 # ============================================================
 
-output_file = "Socionix_instagram_report_validation.xlsx"
+output_file = "Socionix_instagram_report_post_validation.xlsx"
 
 validation_df.to_excel(
     output_file,
@@ -269,7 +401,7 @@ ws = wb["Page Report"]
 # MERGE SAME DATE GROUP ROWS      , when instagram id have same dealer_id else use Group by technique
 # ============================================================
 
-merge_columns = ["A", "B", "C", "D", "E"]    #Columns on which grouping will be apply
+merge_columns = ["A", "B", "C", "D", "E","F"]    #Columns on which grouping will be apply
 
 max_row = ws.max_row
 current_start = 2

@@ -2,6 +2,10 @@ import requests
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 
